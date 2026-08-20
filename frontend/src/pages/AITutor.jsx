@@ -84,7 +84,10 @@ export default function AITutor() {
         body: JSON.stringify(payload),
         signal: controller.signal,
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        console.warn(`[AITutor] Backend returned HTTP ${res.status}`, { learnerId: payload.learnerId ? '[set]' : '[missing]' })
+        throw new Error(`HTTP ${res.status}`)
+      }
 
       const contentType = res.headers.get('content-type') || ''
       if (contentType.includes('text/event-stream') && res.body) {
@@ -93,6 +96,7 @@ export default function AITutor() {
         const decoder = new TextDecoder()
         let buffer = ''
         let full = ''
+        let serverMessage = null
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -105,6 +109,10 @@ export default function AITutor() {
             if (!payloadStr) continue
             try {
               const obj = JSON.parse(payloadStr)
+              if (obj.success === false) {
+                serverMessage = obj.message || UNAVAILABLE_MSG
+                continue
+              }
               if (obj.delta) {
                 full += obj.delta
                 onDelta?.(full)
@@ -114,6 +122,10 @@ export default function AITutor() {
             }
           }
         }
+        if (serverMessage) {
+          console.warn(`[AITutor] Server reported: ${serverMessage}`)
+          return serverMessage
+        }
         return full || UNAVAILABLE_MSG
       }
 
@@ -121,6 +133,7 @@ export default function AITutor() {
       if (data.delta) return data.delta
       return data.content || UNAVAILABLE_MSG
     } catch (err) {
+      console.warn(`[AITutor] Request failed (attempt ${attempt + 1}/3):`, err?.name === 'AbortError' ? 'timeout' : (err?.message || err))
       if (attempt < 2) {
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
         return callApi(text, onDelta, attempt + 1)

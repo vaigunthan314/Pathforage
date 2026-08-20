@@ -4,6 +4,8 @@ import com.pathforge.model.Learner;
 import com.pathforge.model.LearnerSkill;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
@@ -24,6 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class AIService {
+
+    private static final Logger log = LoggerFactory.getLogger(AIService.class);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Thread safety notes:
@@ -124,15 +128,20 @@ public class AIService {
         // Never fabricate a response — if the AI is not reachable, return null
         // so the controller can signal an explicit 503 "temporarily unavailable".
         if (apiKey == null || apiKey.isEmpty()) {
+            log.warn("AI Tutor unavailable: API key is not configured (missing AI_API_KEY/GEMINI_API_KEY)");
             return null;
         }
 
         Map<String, String> context = getCompactContext(learnerId);
-        if (context == null) return null;
+        if (context == null) {
+            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
+            return null;
+        }
 
         try {
             return callAIAPI(buildChatPrompt(message, context));
         } catch (Exception e) {
+            log.warn("AI Tutor call failed: {}", e.toString());
             return null;
         }
     }
@@ -145,12 +154,14 @@ public class AIService {
      */
     public void streamChat(String message, Long learnerId, SseEmitter emitter) {
         if (apiKey == null || apiKey.isEmpty()) {
-            emitter.completeWithError(new IllegalStateException("AI_TUTOR_UNAVAILABLE"));
+            log.warn("AI Tutor unavailable: API key is not configured (missing AI_API_KEY/GEMINI_API_KEY)");
+            emitError(emitter, "AI service temporarily unavailable");
             return;
         }
         Map<String, String> context = getCompactContext(learnerId);
         if (context == null) {
-            emitter.completeWithError(new IllegalStateException("AI_TUTOR_UNAVAILABLE"));
+            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
+            emitError(emitter, "AI service temporarily unavailable");
             return;
         }
 
@@ -164,17 +175,15 @@ public class AIService {
                 } else {
                     String text = callAIAPI(buildChatPrompt(message, context));
                     if (text == null) {
-                        emitter.completeWithError(new IllegalStateException("AI_TUTOR_UNAVAILABLE"));
+                        emitError(emitter, "AI service temporarily unavailable");
                     } else {
                         emitter.send(SseEmitter.event().data(Map.of("delta", text)));
                         emitter.complete();
                     }
                 }
             } catch (Exception e) {
-                try {
-                    emitter.completeWithError(e);
-                } catch (Exception ignored) {
-                }
+                log.warn("AI Tutor stream failed: {}", e.toString());
+                emitError(emitter, "AI service temporarily unavailable");
             }
         }, "ai-tutor-stream");
         t.setDaemon(true);
@@ -202,7 +211,10 @@ public class AIService {
 
         int code = conn.getResponseCode();
         if (code != 200) {
-            emitError(emitter);
+            // Log the upstream status (never the API key) for diagnosis.
+            log.warn("Gemini stream request failed with HTTP {} {}", code, base.startsWith("https")
+                ? URI.create(base).getHost() : "");
+            emitError(emitter, "AI service temporarily unavailable");
             return;
         }
         try (InputStream in = conn.getInputStream();
@@ -227,9 +239,13 @@ public class AIService {
         }
     }
 
-    private void emitError(SseEmitter emitter) {
+    private void emitError(SseEmitter emitter, String message) {
         try {
-            emitter.completeWithError(new IllegalStateException("AI_TUTOR_UNAVAILABLE"));
+            emitter.send(SseEmitter.event().data(Map.of(
+                "success", false,
+                "message", message
+            )));
+            emitter.complete();
         } catch (Exception ignored) {
         }
     }
@@ -304,6 +320,7 @@ public class AIService {
 
             return null;
         } catch (Exception e) {
+            log.warn("OpenAI-format AI call failed: {}", e.toString());
             return null;
         }
     }
@@ -347,6 +364,7 @@ public class AIService {
 
             return null;
         } catch (Exception e) {
+            log.warn("Gemini AI call failed: {}", e.toString());
             return null;
         }
     }

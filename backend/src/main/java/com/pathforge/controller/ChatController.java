@@ -48,7 +48,14 @@ public class ChatController {
 
         SseEmitter emitter = new SseEmitter(120_000L);
         if (message == null || message.isBlank() || learnerIdNumber == null) {
-            emitter.completeWithError(new IllegalArgumentException("message and learnerId are required"));
+            try {
+                emitter.send(SseEmitter.event().data(Map.of(
+                    "success", false,
+                    "message", "message and learnerId are required"
+                )));
+            } catch (Exception ignored) {
+            }
+            emitter.complete();
             return emitter;
         }
         aiService.streamChat(message, learnerIdNumber.longValue(), emitter);
