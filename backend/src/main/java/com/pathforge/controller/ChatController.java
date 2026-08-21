@@ -11,7 +11,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "${app.cors.allowed-origins}")
 public class ChatController {
 
     @Autowired

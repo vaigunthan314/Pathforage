@@ -8,7 +8,6 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/progress")
-@CrossOrigin(origins = "${app.cors.allowed-origins}")
 public class ProgressController {
 
     @Autowired

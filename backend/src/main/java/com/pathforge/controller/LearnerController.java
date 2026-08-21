@@ -13,7 +13,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/learners")
-@CrossOrigin(origins = "${app.cors.allowed-origins}")
 public class LearnerController {
 
     @Autowired

@@ -10,7 +10,6 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/skill-gap")
-@CrossOrigin(origins = "${app.cors.allowed-origins}")
 public class SkillGapController {
 
     @Autowired

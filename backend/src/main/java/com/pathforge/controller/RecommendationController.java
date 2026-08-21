@@ -11,7 +11,6 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "${app.cors.allowed-origins}")
 public class RecommendationController {
 
     @Autowired

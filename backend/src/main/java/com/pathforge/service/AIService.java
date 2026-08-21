@@ -251,7 +251,12 @@ public class AIService {
     // ═══════════════════════════════════════════════════════════════════════
 
     private String callOpenAICompatibleAPI(String key, String url, String mdl, String prompt) {
+        long start = System.currentTimeMillis();
+        String host = "unknown";
         try {
+            host = url != null ? URI.create(url).getHost() : "unknown";
+            log.info("AI request → provider={}, url={}, model={}", host, url, mdl);
+
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(key);
@@ -266,6 +271,9 @@ public class AIService {
 
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
             ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
+
+            long elapsed = System.currentTimeMillis() - start;
+            log.info("AI response ← status={}, provider={}, elapsed={}ms", response.getStatusCode(), host, elapsed);
 
             if (response.getBody() != null && response.getBody().get("choices") != null) {
                 Object choices = response.getBody().get("choices");
@@ -282,7 +290,9 @@ public class AIService {
             }
             return null;
         } catch (Exception e) {
-            log.warn("OpenAI-compatible API call failed (url={}): {}", url != null ? URI.create(url).getHost() : "?", e.toString());
+            long elapsed = System.currentTimeMillis() - start;
+            log.error("AI request FAILED — provider={}, model={}, elapsed={}ms, error={}: {}",
+                    host, mdl, elapsed, e.getClass().getSimpleName(), e.getMessage());
             return null;
         }
     }
@@ -292,6 +302,10 @@ public class AIService {
      * Each line is `data: {"choices":[{"delta":{"content":"..."}}]}`.
      */
     private void streamOpenAICompatible(SseEmitter emitter, String key, String url, String mdl, String prompt) throws Exception {
+        long start = System.currentTimeMillis();
+        String host = url != null ? URI.create(url).getHost() : "unknown";
+        log.info("AI stream request → provider={}, model={}", host, mdl);
+
         var conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
         conn.setRequestMethod("POST");
         conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -313,18 +327,20 @@ public class AIService {
 
         int code = conn.getResponseCode();
         if (code != 200) {
-            String host = url != null ? URI.create(url).getHost() : "unknown";
-            log.warn("OpenAI-compatible stream request failed with HTTP {} from {}", code, host);
+            long elapsed = System.currentTimeMillis() - start;
+            log.error("AI stream FAILED — provider={}, status={}, elapsed={}ms", host, code, elapsed);
             // Read error body for diagnosis (never the API key)
             try (InputStream errStream = conn.getErrorStream()) {
                 if (errStream != null) {
                     String errBody = new String(errStream.readAllBytes(), StandardCharsets.UTF_8);
-                    log.warn("Error body: {}", errBody.substring(0, Math.min(errBody.length(), 500)));
+                    log.error("Stream error body ({} chars): {}", errBody.length(), errBody.substring(0, Math.min(errBody.length(), 300)));
                 }
             } catch (Exception ignored) {}
             emitError(emitter, "AI service temporarily unavailable");
             return;
         }
+
+        log.info("AI stream connected — provider={}, status=200", host);
 
         try (InputStream in = conn.getInputStream();
              BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
@@ -348,6 +364,8 @@ public class AIService {
                     return;
                 }
             }
+            long elapsed = System.currentTimeMillis() - start;
+            log.info("AI stream completed — provider={}, elapsed={}ms", host, elapsed);
             emitter.complete();
         }
     }
