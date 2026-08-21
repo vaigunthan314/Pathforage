@@ -20,7 +20,6 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -46,6 +45,17 @@ public class AIService {
     private static final int CONTEXT_CACHE_MAX = 256;
     private static final long CONTEXT_CACHE_TTL_MS = 10 * 60 * 1000L;
 
+    // ── Groq (primary provider) ──────────────────────────────────────────
+    @Value("${groq.api.key:}")
+    private String groqApiKey;
+
+    @Value("${groq.api.url:https://api.groq.com/openai/v1/chat/completions}")
+    private String groqApiUrl;
+
+    @Value("${groq.api.model:llama-3.3-70b-versatile}")
+    private String groqModel;
+
+    // ── Gemini / legacy fallback ─────────────────────────────────────────
     @Value("${ai.api.key:}")
     private String apiKey;
 
@@ -79,11 +89,36 @@ public class AIService {
         restTemplate = new RestTemplate(factory);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // PROVIDER RESOLUTION — Groq is primary; Gemini/legacy is fallback.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private boolean isGroqAvailable() {
+        return groqApiKey != null && !groqApiKey.isBlank();
+    }
+
+    private boolean isGeminiAvailable() {
+        return apiKey != null && !apiKey.isBlank();
+    }
+
+    private boolean isGeminiNative() {
+        return apiUrl != null && apiUrl.contains("generativelanguage.googleapis.com")
+                || model != null && model.toLowerCase().startsWith("gemini");
+    }
+
     /**
-     * Returns a compact, cached learner context map (career, level, skills, ...).
-     * Never sends the full learner profile to the model. Bounded per-learner
-     * cache avoids repeated database fetches for every chat message.
+     * Returns true when the given URL/model pair points to the Gemini native API
+     * (not an OpenAI-compatible gateway).
      */
+    private boolean isGeminiNative(String url, String mdl) {
+        return url != null && url.contains("generativelanguage.googleapis.com")
+                || mdl != null && mdl.toLowerCase().startsWith("gemini");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LEARNER CONTEXT — cached, per-learner, thread-safe.
+    // ═══════════════════════════════════════════════════════════════════════
+
     private Map<String, String> getCompactContext(Long learnerId) {
         CachedContext cached = contextCache.get(learnerId);
         if (cached != null && cached.expiresAt > System.currentTimeMillis()) {
@@ -112,7 +147,6 @@ public class AIService {
         );
 
         if (contextCache.size() >= CONTEXT_CACHE_MAX) {
-            // Simple bounded eviction: drop expired entries, else clear.
             contextCache.entrySet().removeIf(e -> e.getValue().expiresAt <= System.currentTimeMillis());
             if (contextCache.size() >= CONTEXT_CACHE_MAX) contextCache.clear();
         }
@@ -124,71 +158,203 @@ public class AIService {
         if (learnerId != null) contextCache.remove(learnerId);
     }
 
-    public String chat(String message, Long learnerId) {
-        // Never fabricate a response — if the AI is not reachable, return null
-        // so the controller can signal an explicit 503 "temporarily unavailable".
-        if (apiKey == null || apiKey.isEmpty()) {
-            log.warn("AI Tutor unavailable: API key is not configured (missing AI_API_KEY/GEMINI_API_KEY)");
-            return null;
-        }
+    // ═══════════════════════════════════════════════════════════════════════
+    // NON-STREAMING CHAT — Groq primary, Gemini fallback.
+    // ═══════════════════════════════════════════════════════════════════════
 
+    public String chat(String message, Long learnerId) {
         Map<String, String> context = getCompactContext(learnerId);
         if (context == null) {
             log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
             return null;
         }
 
+        String prompt = buildChatPrompt(message, context);
+
+        // ── Attempt 1: Groq ──────────────────────────────────────────────
+        if (isGroqAvailable()) {
+            try {
+                String result = callOpenAICompatibleAPI(groqApiKey, groqApiUrl, groqModel, prompt);
+                if (result != null) return result;
+            } catch (Exception e) {
+                log.warn("Groq chat failed, trying Gemini fallback: {}", e.toString());
+            }
+        }
+
+        // ── Attempt 2: Gemini / legacy fallback ──────────────────────────
+        if (isGeminiAvailable()) {
+            try {
+                return callAIAPI(prompt);
+            } catch (Exception e) {
+                log.warn("Gemini fallback chat also failed: {}", e.toString());
+            }
+        }
+
+        log.warn("AI Tutor unavailable: no provider succeeded for learnerId={}", learnerId);
+        return null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STREAMING CHAT — Groq primary (OpenAI SSE), Gemini native fallback.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    public void streamChat(String message, Long learnerId, SseEmitter emitter) {
+        Map<String, String> context = getCompactContext(learnerId);
+        if (context == null) {
+            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
+            emitError(emitter, "AI service temporarily unavailable");
+            return;
+        }
+
+        String prompt = buildChatPrompt(message, context);
+
+        Thread t = new Thread(() -> {
+            // ── Attempt 1: Groq streaming (OpenAI-compatible SSE) ─────────
+            if (isGroqAvailable()) {
+                try {
+                    streamOpenAICompatible(emitter, groqApiKey, groqApiUrl, groqModel, prompt);
+                    return;
+                } catch (Exception e) {
+                    log.warn("Groq stream failed, trying Gemini fallback: {}", e.toString());
+                }
+            }
+
+            // ── Attempt 2: Gemini native streaming ───────────────────────
+            if (isGeminiAvailable()) {
+                try {
+                    if (isGeminiNative(apiUrl, model)) {
+                        streamGemini(emitter, prompt);
+                    } else {
+                        // OpenAI-compatible fallback (legacy free.ai gateway)
+                        String text = callOpenAICompatibleAPI(apiKey, apiUrl, model, prompt);
+                        if (text == null) {
+                            emitError(emitter, "AI service temporarily unavailable");
+                        } else {
+                            emitter.send(SseEmitter.event().data(Map.of("delta", text)));
+                            emitter.complete();
+                        }
+                    }
+                    return;
+                } catch (Exception e) {
+                    log.warn("Gemini fallback stream also failed: {}", e.toString());
+                }
+            }
+
+            emitError(emitter, "AI service temporarily unavailable");
+        }, "ai-tutor-stream");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPENAI-COMPATIBLE API (used by Groq and legacy free.ai gateway)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private String callOpenAICompatibleAPI(String key, String url, String mdl, String prompt) {
         try {
-            return callAIAPI(buildChatPrompt(message, context));
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(key);
+
+            Map<String, Object> requestBody = new java.util.HashMap<>();
+            requestBody.put("model", mdl);
+            requestBody.put("messages", new Object[]{
+                Map.of("role", "user", "content", prompt)
+            });
+            requestBody.put("temperature", 0.7);
+            requestBody.put("max_tokens", 2048);
+
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
+
+            if (response.getBody() != null && response.getBody().get("choices") != null) {
+                Object choices = response.getBody().get("choices");
+                Object first = choices instanceof java.util.List<?> list && !list.isEmpty() ? list.get(0)
+                        : choices instanceof Object[] arr && arr.length > 0 ? arr[0] : null;
+                if (first != null) {
+                    Map choice = (Map) first;
+                    Map messageObj = (Map) choice.get("message");
+                    if (messageObj != null) {
+                        Object text = messageObj.get("content");
+                        if (text != null) return text.toString();
+                    }
+                }
+            }
+            return null;
         } catch (Exception e) {
-            log.warn("AI Tutor call failed: {}", e.toString());
+            log.warn("OpenAI-compatible API call failed (url={}): {}", url != null ? URI.create(url).getHost() : "?", e.toString());
             return null;
         }
     }
 
     /**
-     * Streaming chat: pushes SSE text deltas to the emitter. Runs on a
-     * detached thread so the Tomcat worker is freed immediately. Only the
-     * Gemini-native endpoint supports streaming here; OpenAI-format providers
-     * fall back to a single non-streamed response.
+     * Streaming via OpenAI-compatible SSE (used by Groq and legacy gateways).
+     * Each line is `data: {"choices":[{"delta":{"content":"..."}}]}`.
      */
-    public void streamChat(String message, Long learnerId, SseEmitter emitter) {
-        if (apiKey == null || apiKey.isEmpty()) {
-            log.warn("AI Tutor unavailable: API key is not configured (missing AI_API_KEY/GEMINI_API_KEY)");
-            emitError(emitter, "AI service temporarily unavailable");
-            return;
-        }
-        Map<String, String> context = getCompactContext(learnerId);
-        if (context == null) {
-            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
-            emitError(emitter, "AI service temporarily unavailable");
-            return;
-        }
+    private void streamOpenAICompatible(SseEmitter emitter, String key, String url, String mdl, String prompt) throws Exception {
+        var conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(STREAM_TIMEOUT_MS);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Authorization", "Bearer " + key);
+        conn.setDoOutput(true);
 
-        boolean gemini = apiUrl != null && apiUrl.contains("generativelanguage.googleapis.com")
-                || model != null && model.toLowerCase().startsWith("gemini");
+        Map<String, Object> requestBody = new java.util.HashMap<>();
+        requestBody.put("model", mdl);
+        requestBody.put("messages", new Object[]{
+            Map.of("role", "user", "content", prompt)
+        });
+        requestBody.put("temperature", 0.7);
+        requestBody.put("max_tokens", 2048);
+        requestBody.put("stream", true);
 
-        Thread t = new Thread(() -> {
-            try {
-                if (gemini) {
-                    streamGemini(emitter, buildChatPrompt(message, context));
-                } else {
-                    String text = callAIAPI(buildChatPrompt(message, context));
-                    if (text == null) {
-                        emitError(emitter, "AI service temporarily unavailable");
-                    } else {
-                        emitter.send(SseEmitter.event().data(Map.of("delta", text)));
-                        emitter.complete();
-                    }
+        conn.getOutputStream().write(objectMapper.writeValueAsBytes(requestBody));
+
+        int code = conn.getResponseCode();
+        if (code != 200) {
+            String host = url != null ? URI.create(url).getHost() : "unknown";
+            log.warn("OpenAI-compatible stream request failed with HTTP {} from {}", code, host);
+            // Read error body for diagnosis (never the API key)
+            try (InputStream errStream = conn.getErrorStream()) {
+                if (errStream != null) {
+                    String errBody = new String(errStream.readAllBytes(), StandardCharsets.UTF_8);
+                    log.warn("Error body: {}", errBody.substring(0, Math.min(errBody.length(), 500)));
                 }
-            } catch (Exception e) {
-                log.warn("AI Tutor stream failed: {}", e.toString());
-                emitError(emitter, "AI service temporarily unavailable");
+            } catch (Exception ignored) {}
+            emitError(emitter, "AI service temporarily unavailable");
+            return;
+        }
+
+        try (InputStream in = conn.getInputStream();
+             BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data:")) continue;
+                String payload = line.substring(5).trim();
+                if (payload.isEmpty() || "[DONE]".equals(payload)) continue;
+                try {
+                    JsonNode node = objectMapper.readTree(payload);
+                    // OpenAI format: choices[0].delta.content
+                    JsonNode choicesNode = node.path("choices");
+                    if (choicesNode.isArray() && choicesNode.size() > 0) {
+                        JsonNode delta = choicesNode.get(0).path("delta").path("content");
+                        if (!delta.isMissingNode() && !delta.asText().isEmpty()) {
+                            emitter.send(SseEmitter.event().data(Map.of("delta", delta.asText())));
+                        }
+                    }
+                } catch (Exception sendFailure) {
+                    // Client disconnected or stream ended — stop consuming.
+                    return;
+                }
             }
-        }, "ai-tutor-stream");
-        t.setDaemon(true);
-        t.start();
+            emitter.complete();
+        }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // GEMINI NATIVE API (kept as fallback)
+    // ═══════════════════════════════════════════════════════════════════════
 
     private void streamGemini(SseEmitter emitter, String prompt) throws Exception {
         String base = apiUrl != null && !apiUrl.isBlank() ? apiUrl
@@ -211,9 +377,8 @@ public class AIService {
 
         int code = conn.getResponseCode();
         if (code != 200) {
-            // Log the upstream status (never the API key) for diagnosis.
-            log.warn("Gemini stream request failed with HTTP {} {}", code, base.startsWith("https")
-                ? URI.create(base).getHost() : "");
+            String host = apiUrl != null ? URI.create(apiUrl).getHost() : "unknown";
+            log.warn("Gemini stream request failed with HTTP {} from {}", code, host);
             emitError(emitter, "AI service temporarily unavailable");
             return;
         }
@@ -231,7 +396,6 @@ public class AIService {
                         emitter.send(SseEmitter.event().data(Map.of("delta", text.asText())));
                     }
                 } catch (Exception sendFailure) {
-                    // Client disconnected or stream ended — stop consuming.
                     return;
                 }
             }
@@ -239,16 +403,55 @@ public class AIService {
         }
     }
 
-    private void emitError(SseEmitter emitter, String message) {
+    private String callAIAPI(String prompt) {
+        return isGeminiNative() ? callGeminiAPI(prompt) : callOpenAICompatibleAPI(apiKey, apiUrl, model, prompt);
+    }
+
+    private String callGeminiAPI(String prompt) {
         try {
-            emitter.send(SseEmitter.event().data(Map.of(
-                "success", false,
-                "message", message
-            )));
-            emitter.complete();
-        } catch (Exception ignored) {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("x-goog-api-key", apiKey);
+
+            String url = apiUrl != null && !apiUrl.isBlank() ? apiUrl
+                    : "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
+
+            Map<String, Object> requestBody = new java.util.HashMap<>();
+            requestBody.put("contents", new Object[]{
+                Map.of("parts", new Object[]{ Map.of("text", prompt) })
+            });
+
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
+
+            if (response.getBody() != null && response.getBody().get("candidates") != null) {
+                Object candidates = response.getBody().get("candidates");
+                Object first = candidates instanceof java.util.List<?> list && !list.isEmpty() ? list.get(0)
+                        : candidates instanceof Object[] arr && arr.length > 0 ? arr[0] : null;
+                if (first != null) {
+                    Map candidate = (Map) first;
+                    Map content = (Map) candidate.get("content");
+                    if (content != null && content.get("parts") != null) {
+                        Object parts = content.get("parts");
+                        Object part = parts instanceof java.util.List<?> pl && !pl.isEmpty() ? pl.get(0)
+                                : parts instanceof Object[] parr && parr.length > 0 ? parr[0] : null;
+                        if (part != null) {
+                            Object text = ((Map) part).get("text");
+                            if (text != null) return text.toString();
+                        }
+                    }
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            log.warn("Gemini AI call failed: {}", e.toString());
+            return null;
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PROMPT BUILDER — shared across all providers.
+    // ═══════════════════════════════════════════════════════════════════════
 
     private String buildChatPrompt(String message, Map<String, String> ctx) {
         return String.format("""
@@ -279,122 +482,61 @@ public class AIService {
         );
     }
 
-    private boolean isGemini() {
-        return apiUrl != null && apiUrl.contains("generativelanguage.googleapis.com")
-                || model != null && model.toLowerCase().startsWith("gemini");
-    }
-
-    private String callAIAPI(String prompt) {
-        return isGemini() ? callGeminiAPI(prompt) : callOpenAIAPI(prompt);
-    }
-
-    private String callOpenAIAPI(String prompt) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(apiKey);
-
-            Map<String, Object> requestBody = new java.util.HashMap<>();
-            requestBody.put("model", model);
-            requestBody.put("messages", new Object[]{
-                Map.of("role", "user", "content", prompt)
-            });
-
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-
-            ResponseEntity<Map> response = restTemplate.postForEntity(apiUrl, request, Map.class);
-
-            if (response.getBody() != null && response.getBody().get("choices") != null) {
-                Object choices = response.getBody().get("choices");
-                Object first = choices instanceof java.util.List<?> list && !list.isEmpty() ? list.get(0)
-                        : choices instanceof Object[] arr && arr.length > 0 ? arr[0] : null;
-                if (first != null) {
-                    Map choice = (Map) first;
-                    Map messageObj = (Map) choice.get("message");
-                    if (messageObj != null) {
-                        Object text = messageObj.get("content");
-                        if (text != null) return text.toString();
-                    }
-                }
-            }
-
-            return null;
-        } catch (Exception e) {
-            log.warn("OpenAI-format AI call failed: {}", e.toString());
-            return null;
-        }
-    }
-
-    private String callGeminiAPI(String prompt) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("x-goog-api-key", apiKey);
-
-            String url = apiUrl != null && !apiUrl.isBlank() ? apiUrl
-                    : "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
-
-            Map<String, Object> requestBody = new java.util.HashMap<>();
-            requestBody.put("contents", new Object[]{
-                Map.of("parts", new Object[]{ Map.of("text", prompt) })
-            });
-
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-
-            ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
-
-            if (response.getBody() != null && response.getBody().get("candidates") != null) {
-                Object candidates = response.getBody().get("candidates");
-                Object first = candidates instanceof java.util.List<?> list && !list.isEmpty() ? list.get(0)
-                        : candidates instanceof Object[] arr && arr.length > 0 ? arr[0] : null;
-                if (first != null) {
-                    Map candidate = (Map) first;
-                    Map content = (Map) candidate.get("content");
-                    if (content != null && content.get("parts") != null) {
-                        Object parts = content.get("parts");
-                        Object part = parts instanceof java.util.List<?> pl && !pl.isEmpty() ? pl.get(0)
-                                : parts instanceof Object[] parr && parr.length > 0 ? parr[0] : null;
-                        if (part != null) {
-                            Object text = ((Map) part).get("text");
-                            if (text != null) return text.toString();
-                        }
-                    }
-                }
-            }
-
-            return null;
-        } catch (Exception e) {
-            log.warn("Gemini AI call failed: {}", e.toString());
-            return null;
-        }
-    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // ASSESSMENT GENERATION (kept as-is, uses legacy provider)
+    // ═══════════════════════════════════════════════════════════════════════
 
     public String generateAssessment(String topic, Learner learner) {
-        if (apiKey == null || apiKey.isEmpty()) {
-            return getFallbackAssessment(topic);
+        // Try Groq first for assessment generation too
+        if (isGroqAvailable()) {
+            try {
+                String prompt = String.format("""
+                    Generate 5 assessment questions for the topic: %s
+                    
+                    Learner Level: %s
+                    Goal: %s
+                    
+                    Format the response as a JSON array with objects containing:
+                    - question: the question text
+                    - type: "mcq" or "true-false"
+                    - options: array of options (for mcq)
+                    - correctAnswer: index of correct answer (for mcq) or boolean (for true-false)
+                    
+                    Make questions appropriate for the learner's level.""",
+                    topic, learner.getCurrentLevel(), learner.getGoal()
+                );
+                String result = callOpenAICompatibleAPI(groqApiKey, groqApiUrl, groqModel, prompt);
+                if (result != null) return result;
+            } catch (Exception e) {
+                log.warn("Groq assessment generation failed, trying fallback: {}", e.toString());
+            }
         }
 
-        try {
-            String prompt = String.format("""
-                Generate 5 assessment questions for the topic: %s
-                
-                Learner Level: %s
-                Goal: %s
-                
-                Format the response as a JSON array with objects containing:
-                - question: the question text
-                - type: "mcq" or "true-false"
-                - options: array of options (for mcq)
-                - correctAnswer: index of correct answer (for mcq) or boolean (for true-false)
-                
-                Make questions appropriate for the learner's level.""",
-                topic, learner.getCurrentLevel(), learner.getGoal()
-            );
-            
-            return callAIAPI(prompt);
-        } catch (Exception e) {
-            return getFallbackAssessment(topic);
+        // Fallback to legacy provider
+        if (isGeminiAvailable()) {
+            try {
+                String prompt = String.format("""
+                    Generate 5 assessment questions for the topic: %s
+                    
+                    Learner Level: %s
+                    Goal: %s
+                    
+                    Format the response as a JSON array with objects containing:
+                    - question: the question text
+                    - type: "mcq" or "true-false"
+                    - options: array of options (for mcq)
+                    - correctAnswer: index of correct answer (for mcq) or boolean (for true-false)
+                    
+                    Make questions appropriate for the learner's level.""",
+                    topic, learner.getCurrentLevel(), learner.getGoal()
+                );
+                return callAIAPI(prompt);
+            } catch (Exception e) {
+                return getFallbackAssessment(topic);
+            }
         }
+
+        return getFallbackAssessment(topic);
     }
 
     private String getFallbackAssessment(String topic) {
@@ -413,5 +555,16 @@ public class AIService {
                 }
             ]
             """.formatted(topic, topic);
+    }
+
+    private void emitError(SseEmitter emitter, String message) {
+        try {
+            emitter.send(SseEmitter.event().data(Map.of(
+                "success", false,
+                "message", message
+            )));
+            emitter.complete();
+        } catch (Exception ignored) {
+        }
     }
 }
