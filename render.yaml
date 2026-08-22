@@ -1,0 +1,9 @@
+services:
+  - type: static_site
+    name: pathforge
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

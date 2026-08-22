@@ -20,6 +20,7 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import jakarta.annotation.PostConstruct;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -27,6 +28,16 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AIService {
 
     private static final Logger log = LoggerFactory.getLogger(AIService.class);
+
+    @PostConstruct
+    public void logProviderStatus() {
+        log.info("AI Tutor provider status: Groq available={}, Fallback available={}",
+                isGroqAvailable(), isGeminiAvailable());
+        if (!isGroqAvailable() && !isGeminiAvailable()) {
+            log.error("NO AI PROVIDER CONFIGURED. Set GROQ_API_KEY (or AI_API_KEY) "
+                    + "as a Render environment variable. AI Tutor will return 503.");
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Thread safety notes:
