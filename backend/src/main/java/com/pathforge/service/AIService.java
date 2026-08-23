@@ -189,19 +189,22 @@ public class AIService {
     private Learner resolveLearner(Object rawLearnerId) {
         if (rawLearnerId == null) return null;
         try {
+            String strId = rawLearnerId.toString().trim();
+            if (strId.isEmpty()) return null;
+            // Always try authId first — survives H2 wipes on Render redeploy
+            Learner learner = learnerService.getOrCreateByAuthId(strId);
+            if (learner != null) return learner;
+        } catch (Exception e) {
+            log.warn("[resolveLearner] getOrCreateByAuthId failed for learnerId={}: {}", rawLearnerId, e.getMessage());
+        }
+        // Fallback: try numeric DB id
+        try {
             if (rawLearnerId instanceof Number n) {
                 return learnerService.getLearner(n.longValue());
             }
             String strId = rawLearnerId.toString().trim();
-            if (strId.isEmpty()) return null;
-            // If it looks like a numeric string, try DB id first
-            try {
-                long numericId = Long.parseLong(strId);
-                return learnerService.getLearner(numericId);
-            } catch (NumberFormatException ignored) {
-                // Not numeric — treat as Firebase UID (authId)
-            }
-            return learnerService.getOrCreateByAuthId(strId);
+            long numericId = Long.parseLong(strId);
+            return learnerService.getLearner(numericId);
         } catch (Exception e) {
             log.warn("[resolveLearner] Failed to resolve learnerId={}: {}", rawLearnerId, e.getMessage());
             return null;

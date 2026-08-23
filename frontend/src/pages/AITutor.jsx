@@ -60,7 +60,7 @@ export default function AITutor() {
     // backendId is the canonical server-side learner record for this Firebase
     // user (set by profileService reconciliation). Never fall back to a
     // hardcoded learner — the backend rejects requests without a real learnerId.
-    const learnerId = profile?.backendId || profile?.userId || currentUser?.uid
+    const learnerId = currentUser?.uid || profile?.backendId?.toString() || profile?.userId
 
     const history = messages.slice(-6).map(m => ({
       role: m.role,
