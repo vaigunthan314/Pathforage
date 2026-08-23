@@ -438,7 +438,6 @@ public class AIService {
             });
             requestBody.put("temperature", 0.7);
             requestBody.put("max_tokens", 2048);
-            requestBody.put("enable_thinking", false);
 
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
             ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
@@ -494,7 +493,6 @@ public class AIService {
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 2048);
         requestBody.put("stream", true);
-        requestBody.put("enable_thinking", false);
 
         byte[] bodyBytes = objectMapper.writeValueAsBytes(requestBody);
         log.info("[streamOpenAI] Sending request — body size={} bytes", bodyBytes.length);
