@@ -812,7 +812,8 @@ export default function Landing() {
             </div>
             <span className="font-medium text-[rgba(247,247,244,0.8)]">PathForge</span>
           </div>
-          <span>Built for HCL / HackerEarth Hackathon</span>
+
+
         </div>
       </footer>
     </div>
