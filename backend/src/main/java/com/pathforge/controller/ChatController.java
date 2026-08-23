@@ -22,24 +22,15 @@ public class ChatController {
 
     @PostMapping("/chat")
     public ResponseEntity<Map<String, String>> chat(@RequestBody Map<String, Object> request) {
-        String message = (String) request.get("message");
-        Number learnerIdNumber = request.get("learnerId") instanceof Number ? (Number) request.get("learnerId") : null;
-        if (message == null || message.isBlank() || learnerIdNumber == null) {
-            return ResponseEntity.badRequest().body(Map.of("error", "message and learnerId are required"));
+        Map<String, String> result = aiService.handleChat(
+            (String) request.get("message"),
+            request.get("learnerId")
+        );
+        if (result.containsKey("error")) {
+            boolean notFound = result.get("error").contains("not found");
+            return ResponseEntity.status(notFound ? 404 : 400).body(result);
         }
-
-        String response = aiService.chat(message, learnerIdNumber.longValue());
-
-        if (response == null) {
-            return ResponseEntity.status(503).body(Map.of(
-                "error", "AI Tutor is temporarily unavailable. Please try again later."
-            ));
-        }
-
-        return ResponseEntity.ok(Map.of(
-            "role", "assistant",
-            "content", response
-        ));
+        return ResponseEntity.ok(result);
     }
 
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

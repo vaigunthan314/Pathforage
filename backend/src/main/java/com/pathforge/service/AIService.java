@@ -183,21 +183,47 @@ public class AIService {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
+     * Resolve a learnerId (numeric DB id OR Firebase UID string) to a Learner.
+     * Returns null if not found.
+     */
+    private Learner resolveLearner(Object rawLearnerId) {
+        if (rawLearnerId == null) return null;
+        try {
+            if (rawLearnerId instanceof Number n) {
+                return learnerService.getLearner(n.longValue());
+            }
+            String strId = rawLearnerId.toString().trim();
+            if (strId.isEmpty()) return null;
+            // If it looks like a numeric string, try DB id first
+            try {
+                long numericId = Long.parseLong(strId);
+                return learnerService.getLearner(numericId);
+            } catch (NumberFormatException ignored) {
+                // Not numeric — treat as Firebase UID (authId)
+            }
+            return learnerService.getOrCreateByAuthId(strId);
+        } catch (Exception e) {
+            log.warn("[resolveLearner] Failed to resolve learnerId={}: {}", rawLearnerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Validate and dispatch a streaming chat request. Returns the emitter after
      * kicking off the background thread. Controllers call this so they never
      * duplicate validation or streaming logic.
      */
     public SseEmitter handleStreamChat(String message, Object rawLearnerId) {
         long start = System.currentTimeMillis();
-        Number learnerIdNumber = rawLearnerId instanceof Number ? (Number) rawLearnerId : null;
 
         log.info("[chat/stream] Request received — message length={}, learnerId type={}, learnerId value={}",
                 message != null ? message.length() : 0,
                 rawLearnerId != null ? rawLearnerId.getClass().getSimpleName() : "null",
-                rawLearnerId instanceof Number ? learnerIdNumber.longValue() : String.valueOf(rawLearnerId));
+                rawLearnerId);
 
         SseEmitter emitter = new SseEmitter(120_000L);
-        if (message == null || message.isBlank() || learnerIdNumber == null) {
+        if (message == null || message.isBlank() || rawLearnerId == null
+                || (rawLearnerId instanceof String s && s.isBlank())) {
             log.warn("[chat/stream] Validation failed — message blank={}, learnerId present={}",
                     message == null || message.isBlank(), rawLearnerId != null);
             try {
@@ -210,8 +236,23 @@ public class AIService {
             emitter.complete();
             return emitter;
         }
+
+        Learner learner = resolveLearner(rawLearnerId);
+        if (learner == null) {
+            log.warn("[chat/stream] Learner not found for learnerId={}", rawLearnerId);
+            try {
+                emitter.send(SseEmitter.event().data(Map.of(
+                    "success", false,
+                    "message", "Learner profile not found. Please complete onboarding first."
+                )));
+            } catch (Exception ignored) {
+            }
+            emitter.complete();
+            return emitter;
+        }
+
         try {
-            streamChat(message, learnerIdNumber.longValue(), emitter);
+            streamChat(message, learner.getId(), emitter);
         } catch (Exception e) {
             log.error("[chat/stream] Exception on request thread — class={}, message={}, root cause={}: {}",
                     e.getClass().getSimpleName(), e.getMessage(),
@@ -228,6 +269,28 @@ public class AIService {
         }
         log.info("[chat/stream] Request handled in {}ms", System.currentTimeMillis() - start);
         return emitter;
+    }
+
+    /**
+     * Validate and dispatch a non-streaming chat request. Used by both
+     * ChatController (/api/chat) and RootChatController (/chat).
+     */
+    public Map<String, String> handleChat(String message, Object rawLearnerId) {
+        if (message == null || message.isBlank() || rawLearnerId == null
+                || (rawLearnerId instanceof String s && s.isBlank())) {
+            return Map.of("error", "message and learnerId are required");
+        }
+
+        Learner learner = resolveLearner(rawLearnerId);
+        if (learner == null) {
+            return Map.of("error", "Learner profile not found. Please complete onboarding first.");
+        }
+
+        String response = chat(message, learner.getId());
+        if (response == null) {
+            return Map.of("error", "AI Tutor is temporarily unavailable. Please try again later.");
+        }
+        return Map.of("role", "assistant", "content", response);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
