@@ -438,6 +438,7 @@ public class AIService {
             });
             requestBody.put("temperature", 0.7);
             requestBody.put("max_tokens", 2048);
+            requestBody.put("enable_thinking", false);
 
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
             ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
@@ -454,7 +455,7 @@ public class AIService {
                     Map messageObj = (Map) choice.get("message");
                     if (messageObj != null) {
                         Object text = messageObj.get("content");
-                        if (text != null) return text.toString();
+                        if (text != null) return stripThinkBlocks(text.toString());
                     }
                 }
             }
@@ -493,6 +494,7 @@ public class AIService {
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 2048);
         requestBody.put("stream", true);
+        requestBody.put("enable_thinking", false);
 
         byte[] bodyBytes = objectMapper.writeValueAsBytes(requestBody);
         log.info("[streamOpenAI] Sending request — body size={} bytes", bodyBytes.length);
@@ -523,6 +525,7 @@ public class AIService {
              BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
             int chunkCount = 0;
+            ThinkBlockFilter thinkFilter = new ThinkBlockFilter();
             while ((line = reader.readLine()) != null) {
                 if (!line.startsWith("data:")) continue;
                 String payload = line.substring(5).trim();
@@ -536,8 +539,11 @@ public class AIService {
                     if (choicesNode.isArray() && choicesNode.size() > 0) {
                         JsonNode delta = choicesNode.get(0).path("delta").path("content");
                         if (!delta.isMissingNode() && !delta.asText().isEmpty()) {
-                            emitter.send(SseEmitter.event().data(Map.of("delta", delta.asText())));
-                            chunkCount++;
+                            String filtered = thinkFilter.filter(delta.asText());
+                            if (!filtered.isEmpty()) {
+                                emitter.send(SseEmitter.event().data(Map.of("delta", filtered)));
+                                chunkCount++;
+                            }
                         }
                     }
                 } catch (Exception sendFailure) {
@@ -756,11 +762,52 @@ public class AIService {
             """.formatted(topic, topic);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // THINK-BLOCK FILTER — strips ...</think>outputs from thinking models (e.g. Qwen).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static String stripThinkBlocks(String text) {
+        if (text == null) return null;
+        return text.replaceAll("(?s)<think>.*?</think>", "").trim();
+    }
+
+    private static final class ThinkBlockFilter {
+        private boolean inThinkBlock = false;
+
+        String filter(String chunk) {
+            if (chunk == null || chunk.isEmpty()) return "";
+            StringBuilder out = new StringBuilder();
+            int i = 0;
+            while (i < chunk.length()) {
+                if (inThinkBlock) {
+                    int closeIdx = chunk.indexOf("</think>", i);
+                    if (closeIdx >= 0) {
+                        inThinkBlock = false;
+                        i = closeIdx + "</think>".length();
+                    } else {
+                        break;
+                    }
+                } else {
+                    int openIdx = chunk.indexOf("<think>", i);
+                    if (openIdx >= 0) {
+                        out.append(chunk, i, openIdx);
+                        inThinkBlock = true;
+                        i = openIdx + "<think>".length();
+                    } else {
+                        out.append(chunk.substring(i));
+                        break;
+                    }
+                }
+            }
+            return out.toString();
+        }
+    }
+
     private void emitError(SseEmitter emitter, String message) {
         try {
             emitter.send(SseEmitter.event().data(Map.of(
-                "success", false,
-                "message", message
+                    "success", false,
+                    "message", message
             )));
             emitter.complete();
         } catch (Exception ignored) {

@@ -37,6 +37,11 @@ const quickActions = [
 
 const UNAVAILABLE_MSG = 'AI Tutor is temporarily unavailable.'
 
+function stripThinkBlocks(text) {
+  if (!text) return text
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+}
+
 export default function AITutor() {
   const { currentUser } = useAuth()
   const { data: profile } = useActiveProfile()
@@ -115,7 +120,7 @@ export default function AITutor() {
               }
               if (obj.delta) {
                 full += obj.delta
-                onDelta?.(full)
+                onDelta?.(stripThinkBlocks(full))
               }
             } catch {
               // skip malformed intermediate chunk
@@ -126,7 +131,7 @@ export default function AITutor() {
           console.warn(`[AITutor] Server reported: ${serverMessage}`)
           return serverMessage
         }
-        return full || UNAVAILABLE_MSG
+        return stripThinkBlocks(full) || UNAVAILABLE_MSG
       }
 
       const data = await res.json()
