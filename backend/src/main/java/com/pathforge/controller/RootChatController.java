@@ -11,11 +11,18 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.Map;
 
+/**
+ * Root-level chat endpoints (no /api prefix).
+ *
+ * The frontend's VITE_API_URL is set to the backend base URL without /api,
+ * so requests arrive at /chat and /chat/stream instead of /api/chat and
+ * /api/chat/stream.  This controller handles the root-level paths and
+ * delegates to the shared AIService logic.
+ */
 @RestController
-@RequestMapping("/api")
-public class ChatController {
+public class RootChatController {
 
-    private static final Logger log = LoggerFactory.getLogger(ChatController.class);
+    private static final Logger log = LoggerFactory.getLogger(RootChatController.class);
 
     @Autowired
     private AIService aiService;

@@ -179,6 +179,58 @@ public class AIService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC VALIDATION + DISPATCH — called by ChatController (both /api and root)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Validate and dispatch a streaming chat request. Returns the emitter after
+     * kicking off the background thread. Controllers call this so they never
+     * duplicate validation or streaming logic.
+     */
+    public SseEmitter handleStreamChat(String message, Object rawLearnerId) {
+        long start = System.currentTimeMillis();
+        Number learnerIdNumber = rawLearnerId instanceof Number ? (Number) rawLearnerId : null;
+
+        log.info("[chat/stream] Request received — message length={}, learnerId type={}, learnerId value={}",
+                message != null ? message.length() : 0,
+                rawLearnerId != null ? rawLearnerId.getClass().getSimpleName() : "null",
+                rawLearnerId instanceof Number ? learnerIdNumber.longValue() : String.valueOf(rawLearnerId));
+
+        SseEmitter emitter = new SseEmitter(120_000L);
+        if (message == null || message.isBlank() || learnerIdNumber == null) {
+            log.warn("[chat/stream] Validation failed — message blank={}, learnerId present={}",
+                    message == null || message.isBlank(), rawLearnerId != null);
+            try {
+                emitter.send(SseEmitter.event().data(Map.of(
+                    "success", false,
+                    "message", "message and learnerId are required"
+                )));
+            } catch (Exception ignored) {
+            }
+            emitter.complete();
+            return emitter;
+        }
+        try {
+            streamChat(message, learnerIdNumber.longValue(), emitter);
+        } catch (Exception e) {
+            log.error("[chat/stream] Exception on request thread — class={}, message={}, root cause={}: {}",
+                    e.getClass().getSimpleName(), e.getMessage(),
+                    e.getCause() != null ? e.getCause().getClass().getSimpleName() : "none",
+                    e.getCause() != null ? e.getCause().getMessage() : "none", e);
+            try {
+                emitter.send(SseEmitter.event().data(Map.of(
+                    "success", false,
+                    "message", "AI service temporarily unavailable"
+                )));
+                emitter.complete();
+            } catch (Exception ignored) {
+            }
+        }
+        log.info("[chat/stream] Request handled in {}ms", System.currentTimeMillis() - start);
+        return emitter;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // NON-STREAMING CHAT — Groq primary, Gemini fallback.
     // ═══════════════════════════════════════════════════════════════════════
 
