@@ -140,29 +140,38 @@ public class AIService {
         try {
             learner = learnerService.getLearner(learnerId);
         } catch (RuntimeException e) {
+            log.warn("[getCompactContext] Learner lookup failed for id={}: {}", learnerId, e.getMessage());
             return null;
         }
 
-        String skills = learner.getCurrentSkills() != null
-            ? learner.getCurrentSkills().stream()
-                .map(ls -> ls.getSkill().getName())
-                .reduce((a, b) -> a + ", " + b)
-                .orElse("None") : "None";
+        try {
+            String skills = learner.getCurrentSkills() != null
+                ? learner.getCurrentSkills().stream()
+                    .filter(ls -> ls.getSkill() != null)
+                    .map(ls -> ls.getSkill().getName())
+                    .filter(name -> name != null)
+                    .reduce((a, b) -> a + ", " + b)
+                    .orElse("None") : "None";
 
-        Map<String, String> context = Map.of(
-            "name", learner.getName() != null ? learner.getName() : "Learner",
-            "career", learner.getGoal() != null ? learner.getGoal() : "not set yet",
-            "level", learner.getCurrentLevel() != null ? learner.getCurrentLevel() : "not specified",
-            "skills", skills,
-            "style", learner.getLearningStyle() != null ? learner.getLearningStyle() : "not specified"
-        );
+            Map<String, String> context = Map.of(
+                "name", learner.getName() != null ? learner.getName() : "Learner",
+                "career", learner.getGoal() != null ? learner.getGoal() : "not set yet",
+                "level", learner.getCurrentLevel() != null ? learner.getCurrentLevel() : "not specified",
+                "skills", skills,
+                "style", learner.getLearningStyle() != null ? learner.getLearningStyle() : "not specified"
+            );
 
-        if (contextCache.size() >= CONTEXT_CACHE_MAX) {
-            contextCache.entrySet().removeIf(e -> e.getValue().expiresAt <= System.currentTimeMillis());
-            if (contextCache.size() >= CONTEXT_CACHE_MAX) contextCache.clear();
+            if (contextCache.size() >= CONTEXT_CACHE_MAX) {
+                contextCache.entrySet().removeIf(e -> e.getValue().expiresAt <= System.currentTimeMillis());
+                if (contextCache.size() >= CONTEXT_CACHE_MAX) contextCache.clear();
+            }
+            contextCache.put(learnerId, new CachedContext(context, System.currentTimeMillis() + CONTEXT_CACHE_TTL_MS));
+            return context;
+        } catch (Exception e) {
+            log.error("[getCompactContext] Failed to build context for learnerId={}: class={}, message={}",
+                    learnerId, e.getClass().getSimpleName(), e.getMessage());
+            return null;
         }
-        contextCache.put(learnerId, new CachedContext(context, System.currentTimeMillis() + CONTEXT_CACHE_TTL_MS));
-        return context;
     }
 
     public void invalidateContext(Long learnerId) {
@@ -174,9 +183,11 @@ public class AIService {
     // ═══════════════════════════════════════════════════════════════════════
 
     public String chat(String message, Long learnerId) {
+        long start = System.currentTimeMillis();
+        log.info("[chat] Request — learnerId={}, message length={}", learnerId, message != null ? message.length() : 0);
         Map<String, String> context = getCompactContext(learnerId);
         if (context == null) {
-            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
+            log.warn("[chat] Learner context not found for learnerId={}", learnerId);
             return null;
         }
 
@@ -186,22 +197,29 @@ public class AIService {
         if (isGroqAvailable()) {
             try {
                 String result = callOpenAICompatibleAPI(groqApiKey, groqApiUrl, groqModel, prompt);
-                if (result != null) return result;
+                if (result != null) {
+                    log.info("[chat] Groq succeeded in {}ms", System.currentTimeMillis() - start);
+                    return result;
+                }
             } catch (Exception e) {
-                log.warn("Groq chat failed, trying Gemini fallback: {}", e.toString());
+                log.warn("[chat] Groq failed — class={}, message={}", e.getClass().getSimpleName(), e.getMessage());
             }
         }
 
         // ── Attempt 2: Gemini / legacy fallback ──────────────────────────
         if (isGeminiAvailable()) {
             try {
-                return callAIAPI(prompt);
+                String result = callAIAPI(prompt);
+                if (result != null) {
+                    log.info("[chat] Gemini fallback succeeded in {}ms", System.currentTimeMillis() - start);
+                    return result;
+                }
             } catch (Exception e) {
-                log.warn("Gemini fallback chat also failed: {}", e.toString());
+                log.warn("[chat] Gemini fallback also failed — class={}, message={}", e.getClass().getSimpleName(), e.getMessage());
             }
         }
 
-        log.warn("AI Tutor unavailable: no provider succeeded for learnerId={}", learnerId);
+        log.warn("[chat] All providers failed for learnerId={} in {}ms", learnerId, System.currentTimeMillis() - start);
         return null;
     }
 
@@ -210,48 +228,74 @@ public class AIService {
     // ═══════════════════════════════════════════════════════════════════════
 
     public void streamChat(String message, Long learnerId, SseEmitter emitter) {
+        long start = System.currentTimeMillis();
+        log.info("[streamChat] Provider selected: groq={}", isGroqAvailable());
+
         Map<String, String> context = getCompactContext(learnerId);
         if (context == null) {
-            log.warn("AI Tutor unavailable: learner context not found for learnerId={}", learnerId);
+            log.warn("[streamChat] Learner context not found for learnerId={}", learnerId);
             emitError(emitter, "AI service temporarily unavailable");
             return;
         }
 
         String prompt = buildChatPrompt(message, context);
+        log.info("[streamChat] Prompt built — length={}, career={}, level={}",
+                prompt.length(), context.get("career"), context.get("level"));
 
         Thread t = new Thread(() -> {
-            // ── Attempt 1: Groq streaming (OpenAI-compatible SSE) ─────────
-            if (isGroqAvailable()) {
-                try {
-                    streamOpenAICompatible(emitter, groqApiKey, groqApiUrl, groqModel, prompt);
-                    return;
-                } catch (Exception e) {
-                    log.warn("Groq stream failed, trying Gemini fallback: {}", e.toString());
-                }
-            }
-
-            // ── Attempt 2: Gemini native streaming ───────────────────────
-            if (isGeminiAvailable()) {
-                try {
-                    if (isGeminiNative(apiUrl, model)) {
-                        streamGemini(emitter, prompt);
-                    } else {
-                        // OpenAI-compatible fallback (legacy free.ai gateway)
-                        String text = callOpenAICompatibleAPI(apiKey, apiUrl, model, prompt);
-                        if (text == null) {
-                            emitError(emitter, "AI service temporarily unavailable");
-                        } else {
-                            emitter.send(SseEmitter.event().data(Map.of("delta", text)));
-                            emitter.complete();
-                        }
+            try {
+                // ── Attempt 1: Groq streaming (OpenAI-compatible SSE) ─────────
+                if (isGroqAvailable()) {
+                    try {
+                        log.info("[streamChat] Attempting Groq streaming — model={}", groqModel);
+                        streamOpenAICompatible(emitter, groqApiKey, groqApiUrl, groqModel, prompt);
+                        log.info("[streamChat] Groq stream completed in {}ms", System.currentTimeMillis() - start);
+                        return;
+                    } catch (Exception e) {
+                        log.warn("[streamChat] Groq stream EXCEPTION — class={}, message={}, root={}: {}",
+                                e.getClass().getSimpleName(), e.getMessage(),
+                                e.getCause() != null ? e.getCause().getClass().getSimpleName() : "none",
+                                e.getCause() != null ? e.getCause().getMessage() : "none");
                     }
-                    return;
-                } catch (Exception e) {
-                    log.warn("Gemini fallback stream also failed: {}", e.toString());
+                } else {
+                    log.warn("[streamChat] Groq not available — skipping");
                 }
-            }
 
-            emitError(emitter, "AI service temporarily unavailable");
+                // ── Attempt 2: Gemini native streaming ───────────────────────
+                if (isGeminiAvailable()) {
+                    try {
+                        log.info("[streamChat] Attempting Gemini fallback streaming — model={}", model);
+                        if (isGeminiNative(apiUrl, model)) {
+                            streamGemini(emitter, prompt);
+                        } else {
+                            // OpenAI-compatible fallback (legacy free.ai gateway)
+                            String text = callOpenAICompatibleAPI(apiKey, apiUrl, model, prompt);
+                            if (text == null) {
+                                emitError(emitter, "AI service temporarily unavailable");
+                            } else {
+                                emitter.send(SseEmitter.event().data(Map.of("delta", text)));
+                                emitter.complete();
+                            }
+                        }
+                        log.info("[streamChat] Gemini fallback completed in {}ms", System.currentTimeMillis() - start);
+                        return;
+                    } catch (Exception e) {
+                        log.warn("[streamChat] Gemini fallback EXCEPTION — class={}, message={}, root={}: {}",
+                                e.getClass().getSimpleName(), e.getMessage(),
+                                e.getCause() != null ? e.getCause().getClass().getSimpleName() : "none",
+                                e.getCause() != null ? e.getCause().getMessage() : "none");
+                    }
+                } else {
+                    log.warn("[streamChat] Gemini fallback not available");
+                }
+
+                log.error("[streamChat] ALL providers failed — no provider succeeded in {}ms", System.currentTimeMillis() - start);
+                emitError(emitter, "AI service temporarily unavailable");
+            } catch (Exception e) {
+                log.error("[streamChat] UNCAUGHT exception in stream thread — class={}, message={}: {}",
+                        e.getClass().getSimpleName(), e.getMessage(), e);
+                emitError(emitter, "AI service temporarily unavailable");
+            }
         }, "ai-tutor-stream");
         t.setDaemon(true);
         t.start();
@@ -266,7 +310,7 @@ public class AIService {
         String host = "unknown";
         try {
             host = url != null ? URI.create(url).getHost() : "unknown";
-            log.info("AI request → provider={}, url={}, model={}", host, url, mdl);
+            log.info("[callOpenAI] Request → provider={}, model={}", host, mdl);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -284,7 +328,7 @@ public class AIService {
             ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
 
             long elapsed = System.currentTimeMillis() - start;
-            log.info("AI response ← status={}, provider={}, elapsed={}ms", response.getStatusCode(), host, elapsed);
+            log.info("[callOpenAI] Response ← status={}, provider={}, elapsed={}ms", response.getStatusCode(), host, elapsed);
 
             if (response.getBody() != null && response.getBody().get("choices") != null) {
                 Object choices = response.getBody().get("choices");
@@ -299,10 +343,11 @@ public class AIService {
                     }
                 }
             }
+            log.warn("[callOpenAI] No content in response from {}", host);
             return null;
         } catch (Exception e) {
             long elapsed = System.currentTimeMillis() - start;
-            log.error("AI request FAILED — provider={}, model={}, elapsed={}ms, error={}: {}",
+            log.error("[callOpenAI] FAILED — provider={}, model={}, elapsed={}ms, error={}: {}",
                     host, mdl, elapsed, e.getClass().getSimpleName(), e.getMessage());
             return null;
         }
@@ -315,7 +360,7 @@ public class AIService {
     private void streamOpenAICompatible(SseEmitter emitter, String key, String url, String mdl, String prompt) throws Exception {
         long start = System.currentTimeMillis();
         String host = url != null ? URI.create(url).getHost() : "unknown";
-        log.info("AI stream request → provider={}, model={}", host, mdl);
+        log.info("[streamOpenAI] Request started — provider={}, model={}, url={}", host, mdl, url);
 
         var conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
         conn.setRequestMethod("POST");
@@ -334,49 +379,59 @@ public class AIService {
         requestBody.put("max_tokens", 2048);
         requestBody.put("stream", true);
 
-        conn.getOutputStream().write(objectMapper.writeValueAsBytes(requestBody));
+        byte[] bodyBytes = objectMapper.writeValueAsBytes(requestBody);
+        log.info("[streamOpenAI] Sending request — body size={} bytes", bodyBytes.length);
+        conn.getOutputStream().write(bodyBytes);
 
         int code = conn.getResponseCode();
+        long elapsed = System.currentTimeMillis() - start;
+        log.info("[streamOpenAI] Response received — provider={}, status={}, elapsed={}ms", host, code, elapsed);
+
         if (code != 200) {
-            long elapsed = System.currentTimeMillis() - start;
-            log.error("AI stream FAILED — provider={}, status={}, elapsed={}ms", host, code, elapsed);
-            // Read error body for diagnosis (never the API key)
             try (InputStream errStream = conn.getErrorStream()) {
                 if (errStream != null) {
                     String errBody = new String(errStream.readAllBytes(), StandardCharsets.UTF_8);
-                    log.error("Stream error body ({} chars): {}", errBody.length(), errBody.substring(0, Math.min(errBody.length(), 300)));
+                    log.error("[streamOpenAI] ERROR body from {} ({} chars): {}", host, errBody.length(),
+                            errBody.substring(0, Math.min(errBody.length(), 500)));
+                } else {
+                    log.error("[streamOpenAI] No error stream from {} for status {}", host, code);
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                log.warn("[streamOpenAI] Failed to read error stream: {}", e.getMessage());
+            }
             emitError(emitter, "AI service temporarily unavailable");
             return;
         }
 
-        log.info("AI stream connected — provider={}, status=200", host);
-
+        log.info("[streamOpenAI] Reading SSE stream from {}", host);
         try (InputStream in = conn.getInputStream();
              BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
+            int chunkCount = 0;
             while ((line = reader.readLine()) != null) {
                 if (!line.startsWith("data:")) continue;
                 String payload = line.substring(5).trim();
-                if (payload.isEmpty() || "[DONE]".equals(payload)) continue;
+                if (payload.isEmpty() || "[DONE]".equals(payload)) {
+                    log.info("[streamOpenAI] Stream done from {} — received {} chunks", host, chunkCount);
+                    continue;
+                }
                 try {
                     JsonNode node = objectMapper.readTree(payload);
-                    // OpenAI format: choices[0].delta.content
                     JsonNode choicesNode = node.path("choices");
                     if (choicesNode.isArray() && choicesNode.size() > 0) {
                         JsonNode delta = choicesNode.get(0).path("delta").path("content");
                         if (!delta.isMissingNode() && !delta.asText().isEmpty()) {
                             emitter.send(SseEmitter.event().data(Map.of("delta", delta.asText())));
+                            chunkCount++;
                         }
                     }
                 } catch (Exception sendFailure) {
-                    // Client disconnected or stream ended — stop consuming.
+                    log.warn("[streamOpenAI] Send failure at chunk {} — client likely disconnected", chunkCount);
                     return;
                 }
             }
-            long elapsed = System.currentTimeMillis() - start;
-            log.info("AI stream completed — provider={}, elapsed={}ms", host, elapsed);
+            long totalElapsed = System.currentTimeMillis() - start;
+            log.info("[streamOpenAI] Stream completed — provider={}, chunks={}, total={}ms", host, chunkCount, totalElapsed);
             emitter.complete();
         }
     }
