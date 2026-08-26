@@ -63,7 +63,7 @@ public class AIService {
     @Value("${groq.api.url:https://api.groq.com/openai/v1/chat/completions}")
     private String groqApiUrl;
 
-    @Value("${groq.api.model:llama-3.3-70b-versatile}")
+    @Value("${groq.api.model:openai/gpt-oss-120b}")
     private String groqModel;
 
     // ── Gemini / legacy fallback ─────────────────────────────────────────
@@ -176,6 +176,42 @@ public class AIService {
 
     public void invalidateContext(Long learnerId) {
         if (learnerId != null) contextCache.remove(learnerId);
+    }
+
+    // ── Health / diagnostic helpers (used by AiHealthController) ──────────
+    public boolean isGroqKeyPresent() {
+        return groqApiKey != null && !groqApiKey.isBlank();
+    }
+
+    public String getGroqModel() {
+        return groqModel;
+    }
+
+    public String getGroqUrlHost() {
+        try { return URI.create(groqApiUrl).getHost(); } catch (Exception e) { return groqApiUrl; }
+    }
+
+    public boolean isFallbackKeyPresent() {
+        return apiKey != null && !apiKey.isBlank();
+    }
+
+    public Map<String, Object> probeGroq(String testMessage) {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        if (!isGroqKeyPresent()) {
+            result.put("status", "skipped");
+            result.put("reason", "no Groq API key configured");
+            return result;
+        }
+        try {
+            String response = callOpenAICompatibleAPI(groqApiKey, groqApiUrl, groqModel, testMessage);
+            result.put("status", "ok");
+            result.put("model", groqModel);
+            result.put("responseLength", response != null ? response.length() : 0);
+        } catch (Exception e) {
+            result.put("status", "error");
+            result.put("error", e.getMessage());
+        }
+        return result;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
