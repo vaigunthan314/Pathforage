@@ -434,6 +434,99 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ===== About PathForge ===== */}
+      <section id="about" className="section-pad bg-surface-50">
+        <div className="container-x">
+          <div className="max-w-4xl mx-auto">
+            <Reveal>
+              <div className="text-center mb-12">
+                <h2 className="text-4xl md:text-5xl font-bold leading-[1.05] tracking-[-0.02em] mb-6">About PathForge</h2>
+                <p className="text-lg text-ink-secondary leading-relaxed">
+                  PathForge is an AI-powered personalized career learning platform designed to help students move from learning confusion to career readiness.
+                </p>
+              </div>
+            </Reveal>
+
+            <div className="space-y-8 mb-12">
+              <Reveal>
+                <div className="app-window p-8">
+                  <h3 className="text-xl font-semibold mb-4">What PathForge Is</h3>
+                  <p className="text-sm text-ink-secondary leading-relaxed mb-4">
+                    Instead of giving every student the same learning path, PathForge considers the learner's career goal, current skills, progress, interests, and learning needs to provide a more personalized journey.
+                  </p>
+                  <p className="text-sm text-ink-secondary leading-relaxed">
+                    PathForge brings career planning, personalized roadmaps, learning resources, assessments, skill-gap analysis, projects, progress tracking, and AI-powered guidance together in one platform.
+                  </p>
+                </div>
+              </Reveal>
+
+              <div className="grid md:grid-cols-2 gap-6">
+                <Reveal delay={0.1}>
+                  <div className="app-window p-6 h-full">
+                    <h3 className="text-lg font-semibold mb-3">What PathForge Helps Students Do</h3>
+                    <ul className="space-y-2 text-sm text-ink-secondary">
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand-600 mt-1.5 flex-shrink-0"></span>
+                        <span>Choose and understand their career goal</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand-600 mt-1.5 flex-shrink-0"></span>
+                        <span>Follow a personalized learning roadmap</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand-600 mt-1.5 flex-shrink-0"></span>
+                        <span>Learn through structured topics, explanations, and resources</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand-600 mt-1.5 flex-shrink-0"></span>
+                        <span>Test their knowledge through quizzes and assessments</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand-600 mt-1.5 flex-shrink-0"></span>
+                        <span>Identify skill gaps and areas that need improvement</span>
+                      </li>
+                    </ul>
+                  </div>
+                </Reveal>
+
+                <Reveal delay={0.2}>
+                  <div className="app-window p-6 h-full">
+                    <h3 className="text-lg font-semibold mb-3">More Features</h3>
+                    <ul className="space-y-2 text-sm text-ink-secondary">
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-teal-500 mt-1.5 flex-shrink-0"></span>
+                        <span>Get relevant project recommendations</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-teal-500 mt-1.5 flex-shrink-0"></span>
+                        <span>Track learning progress and career readiness</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-teal-500 mt-1.5 flex-shrink-0"></span>
+                        <span>Ask the AI Tutor for context-aware learning guidance</span>
+                      </li>
+                    </ul>
+                    <div className="mt-6 pt-4 border-t border-surface-200">
+                      <p className="text-sm font-medium text-ink-secondary mb-2">Our Vision</p>
+                      <p className="text-xs text-ink-muted leading-relaxed">
+                        To make career learning less confusing and more personalized by helping every student understand what to learn, why they need to learn it, and what to do next.
+                      </p>
+                    </div>
+                  </div>
+                </Reveal>
+              </div>
+
+              <Reveal delay={0.3}>
+                <div className="text-center">
+                  <p className="text-base font-medium text-ink mb-2">"Stop guessing what to learn next. Let your progress decide."</p>
+                  <p className="text-sm text-ink-tertiary">PathForge Tagline</p>
+                </div>
+              </Reveal>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ===== Trust ===== */}
       <section className="py-12 px-6 border-y border-surface-200 bg-white">
         <div className="container-x">
